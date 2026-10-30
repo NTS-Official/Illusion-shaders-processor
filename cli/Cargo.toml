@@ -1,0 +1,15 @@
+[package]
+name = "shader-convert-cli"
+version = "0.0.1"
+edition = "2024"
+publish = false
+description = "Development CLI for one-off shader conversion and corpus audits."
+
+[[bin]]
+name = "shader-convert"
+path = "src/main.rs"
+
+[dependencies]
+illusion_shader = { path = "..", package = "Illusion-shaders-extension" }
+naga = { path = "../../naga-for-hlsl/naga", features = ["glsl-in", "hlsl-out"] }
+serde_json = "1"

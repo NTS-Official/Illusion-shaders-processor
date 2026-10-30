@@ -8,6 +8,7 @@
 //! Pipeline: `preprocess` -> `dialect` -> naga frontend/validator -> HLSL
 //! backend (with `static_samplers`) -> `manifest`.
 
+pub mod abi;
 pub mod compile;
 pub mod dialect;
 pub mod lexer;

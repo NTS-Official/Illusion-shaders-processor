@@ -41,10 +41,13 @@
 | 1 | `gl_VertexIndex` → `int(gl_VertexIndex)` | naga 把该内建建模为 `u32`，赋给 `int` 会触发 `InvalidStoreTypes` |
 | 2 | `const int n = <expr>; arr[n]` → `arr[(<expr>)]` | naga 要求数组长度是常量表达式 |
 | 3 | `const T[] a = T[](…)` / `T a[] = …` 补全元素个数 | naga 不接受无长度数组 |
-| 4 | `uniform Block { … };` → `layout(binding = N) uniform Block { … };` | naga 要求 uniform block 显式 binding；N 从 0 递增（已有 `layout(binding)` 的块跳过） |
-| 5 | `uniform sampler2D X;` → `layout(binding = 16+2i) uniform texture2D X;` + `layout(binding = 17+2i) uniform sampler X_sampler;`（`samplerCube` 同理，用 `textureCube`） | naga 不支持 combined image sampler；两个 binding 必须不同 |
-| 6 | 形参 `sampler2D p` → `texture2D p, sampler p_sampler`（紧跟原参数插入），调用点补 `, p_sampler` | naga 的类型表没有 `sampler2D`，但支持 opaque 形参 |
-| 7 | `texture(X, …)` 等 → `texture(sampler2D(X, X_sampler), …)`；cube 用 `samplerCube` | naga 只接受显式组合的构造函数 |
+| 4 | `uniform isamplerBuffer X;` → `layout(std430, binding = 48+n) readonly buffer XBuffer { int data[]; } X_buf;`；`texelFetch(X, i).r` → `X_buf.data[(i)]` | naga 与 HLSL 都没有 texel buffer 类型；naga 把只读 SSBO 输出为 `ByteAddressBuffer`（SRV） |
+| 5 | `uniform Block { … };` → `layout(binding = N) uniform Block { … };` | naga 要求 uniform block 显式 binding；N 从 0 递增（已有 `layout(binding)` 的块跳过） |
+| 6 | `uniform sampler2D X;` → `layout(binding = 16+2i) uniform texture2D X;` + `layout(binding = 17+2i) uniform sampler X_sampler;`（`samplerCube` 同理，用 `textureCube`） | naga 不支持 combined image sampler；两个 binding 必须不同 |
+| 7 | 形参 `sampler2D p` → `texture2D p, sampler p_sampler`（紧跟原参数插入），调用点补 `, p_sampler` | naga 的类型表没有 `sampler2D`，但支持 opaque 形参 |
+| 8 | `texture(X, …)` 等 → `texture(sampler2D(X, X_sampler), …)`；cube 用 `samplerCube` | naga 只接受显式组合的构造函数 |
+
+第 4 条要求 `texelFetch` 必须带 `.r`/`.x` 分量选择（语料如此）；不带分量或选其它分量是硬错误。降级的缓冲只能按 32 位元素读取，宿主侧必须提供相应的 32 位视图，见 §7。
 
 改写登记进 manifest 的 `warnings`（非空时）与资源表（binding 号）。改写失败（include 找不到、条件未闭合、`#if` 无法求值）是硬错误，不做回退。
 
@@ -59,8 +62,8 @@ HLSL 是单文件、自包含的 `Shader Model 6.x` 源码，入口名 `main`，
 - cbuffer：`cbuffer global_<n> : register(b<n>) { <Type> global_<n>; }`，`<Type>` 是 GLSL uniform block 的结构体；按 IR 全局变量顺序编号。
 - texture：`Texture2D<float4> X_ : register(t<n>)`、`TextureCube<...>`、`Texture2D<int4>` 等由元素类型决定。
 - sampler：`SamplerState X_sampler : register(s<n>)` 或 `SamplerComparisonState`（`static_samplers` 打开时；关闭时 naga 会退回 sampler heap，本转换器永远打开）。
-- storage buffer：`RWByteAddressBuffer`/`StructuredBuffer` 形式，`register(u<n>)`。
-- 四类寄存器各自从 0 独立计数，`space = 0`。
+- storage buffer：降级的 buffer texture（只读）输出为 `ByteAddressBuffer X_buf : register(t32+n)`，按 32 位元素 `Load`；可写 storage buffer 由 naga 输出 `RWByteAddressBuffer : register(u<n>)`，语料尚未出现。
+- 四类寄存器各自从 0 独立计数，`space = 0`；storage buffer 从 32 起，因此与 texture 的 `t0..` 不冲突。
 
 **布局**
 
@@ -85,7 +88,7 @@ HLSL 是单文件、自包含的 `Shader Model 6.x` 源码，入口名 `main`，
     "textures": [ { "name": "Sampler2", "hlsl_type": "Texture2D<float4>", "register": 0, "space": 0, "group": 0, "binding": 16 } ],
     "samplers": [ { "name": "Sampler2_sampler", "register": 0, "space": 0, "group": 0, "binding": 17, "comparison": false, "texture": "Sampler2" } ],
     "constant_buffers": [ { "name": "constants_Fog", "hlsl_type": "Fog", "register": 0, "space": 0, "group": 0, "binding": 0, "members": [ { "name": "FogColor", "hlsl_type": "float4" } ] } ],
-    "storage_buffers": []
+    "storage_buffers": [ { "name": "CloudFaces_buf", "hlsl_type": "ByteAddressBuffer", "register": 32, "space": 0, "group": 0, "binding": 48, "members": [ { "name": "data", "hlsl_type": "int" } ] } ]
   },
   "stage_io": {
     "inputs": [ { "name": "Position", "location": 0, "hlsl_type": "float3", "interpolation": "Perspective" } ],
@@ -98,7 +101,7 @@ HLSL 是单文件、自包含的 `Shader Model 6.x` 源码，入口名 `main`，
 
 字段约定：
 
-- `group` = GLSL 的 `set`（原版恒为 0）；`binding` = 转换器注入的 binding（块从 0 起、texture `16+2i`、sampler `17+2i`）；`register`/`space` = 实际 HLSL 声明。
+- `group` = GLSL 的 `set`（原版恒为 0）；`binding` = 转换器注入的 binding（块从 0 起、texture `16+2i`、sampler `17+2i`、降级的 buffer texture `48+n`）；`register`/`space` = 实际 HLSL 声明。
 - `members` 只记录名字与 HLSL 类型，**不记录字节偏移**。偏移由 std140 与 HLSL 的对应关系决定，需要机器可读偏移时用 DXC reflection（M2）；不要拿这里的数据自行猜布局。
 - `interpolation` 为 `null` 表示该 IO 用了默认（`smooth`/`Perspective`）。
 - `warnings` 目前恒为空数组，保留给“改写发生但语义仍然成立”的提示。
@@ -115,12 +118,13 @@ HLSL 是单文件、自包含的 `Shader Model 6.x` 源码，入口名 `main`，
 - `shader failed validation`：naga 校验失败（IR 不合法）。
 - `HLSL backend failed`：后端能力缺口。
 
-原版 26.3 语料（72 个 shader）在给定 `tests/fixtures/corpus-defines.json` 时 **70 个可转换**，2 个为已知能力缺口：
+原版 26.3 语料（72 个 shader）在给定 `tests/fixtures/corpus-defines.json` 时 **71 个可转换**，1 个为已知能力缺口：
 
 | 着色器 | 原因 | 处理 |
 | --- | --- | --- |
-| `core/clouds.vsh` | `uniform isamplerBuffer CloudFaces;`；本转换器在方言层直接拒绝：`unsupported GLSL construct: buffer textures are not supported yet`（`src/dialect.rs:410`）。naga 的 GLSL 类型表没有 Buffer 维度（`naga/src/front/glsl/types.rs:122-132` 只有 1D/2D/3D/Cube），IR 的 `ImageDimension` 也没有 Buffer，故即使绕过方言也进不去 | 需要时把它降成 `isampler2D` 并把 `texelFetch(buf, i)` 改写成 `texelFetch(buf, ivec2(i, 0), 0)`；宿主相应改为绑定 2D 视图（`R8_SINT`，N×1） |
-| `core/debug_point.vsh` | `gl_PointSize`；HLSL 没有对应输出语义，naga 报 `Unsupported builtin PointSize` | 调试用着色器；不转换，或去掉该输出后重编译 |
+| `core/debug_point.vsh` | `gl_PointSize`；HLSL 没有对应输出语义，naga 报 `Unsupported builtin PointSize`（`naga/src/back/hlsl/conv.rs:189-191`） | 调试用着色器；不转换，或去掉该输出后重编译 |
+
+`core/clouds.vsh` 的 `isamplerBuffer` 已按 §3 第 4 条降级为只读 storage buffer；它要求宿主把 `CloudFaces` 绑定成 **32 位 `int` 元素**（`R32_SINT` 视图或等价物），否则 `ByteAddressBuffer.Load(i*4)` 读到的是打包后的 4 个 `R8_SINT` 字节。
 
 其他限制：sampler binding array 在 `static_samplers` 下不支持（naga 明确报错）；`#extension` 一律丢弃；函数式宏不支持（语料没有）。
 
@@ -130,23 +134,30 @@ HLSL 是单文件、自包含的 `Shader Model 6.x` 源码，入口名 `main`，
 
 1. 宿主传入：着色器名、GLSL 源（或路径）、stage、include 根、该 pipeline 的 defines。
 2. 转换器返回：HLSL 文本 + manifest。
-3. 宿主把 HLSL 交给 `MCDR.dll` 的 DXC（`DxcCreateInstance`），并按 manifest 装配根签名：cbuffer 用 `b<register>`、texture 用 `t<register>`、sampler 用 `s<register>` 静态采样器。**不能再有 sampler heap**（naga 的默认输出形态），这要求根签名把 sampler 声明为 static。
-4. 反射校验（M2）：拿 DXC reflection 的绑定表与 manifest 比对，不一致就是转换器或契约的 bug。
+3. 宿主把 HLSL 交给 `MCDR.dll` 的 DXC（`DxcCreateInstance`），并按 manifest 装配根签名：cbuffer 用 `b<register>`、texture 用 `t<register>`、sampler 用 `s<register>` 静态采样器、`storage_buffers` 里 `ByteAddressBuffer` 用 `t<register>` 的缓冲 SRV。**不能再有 sampler heap**（naga 的默认输出形态），这要求根签名把 sampler 声明为 static。
+4. `storage_buffers` 的 `ByteAddressBuffer` 只接受 32 位元素视图：原版 `CloudFaces` 是 `R8_SINT` texel buffer，宿主接回时必须在同一资源上建 `R32_SINT` 视图（元素数 = 原 texel 数 / 4），或把 4 个 texel 预先打包成一个 `int`。
+5. 反射校验（M2）：拿 DXC reflection 的绑定表与 manifest 比对，不一致就是转换器或契约的 bug。
 
 在接回之前，宿主自身的行为不受影响：本期不修改 `Illusion`、`MCDR`、`Illusion-Creation` 的任何源码。
+
+宿主与转换器之间的接口是 C ABI（JSON 进、JSON 出），请求/响应 schema、返回值、内存所有权与加载方式见 [`shader-convert-abi.md`](shader-convert-abi.md)。
+
 ## 8. 用法
 
-在当前 crate 目录（`Illusion-shaders-extension\`）下：
+发布产物是 DLL，命令行只用于开发与测试：
 
 ```powershell
-# 编译单个着色器，产物写到 out\ 下：<文件名>.hlsl + <文件名>.manifest.json（如 terrain.vsh.hlsl）
-cargo run --bin shader-convert -- convert <shader> --out out --include <shaders 根> -D SOME_DEFINE
+# 发布物：target\release\illusion_shader.dll（workspace 默认成员只有库，不会构建 exe）
+cargo build --release
+
+# 编译单个着色器（开发用 CLI，产物写到 out\ 下：<文件名>.hlsl + <文件名>.manifest.json）
+cargo run -p shader-convert-cli -- convert <shader> --out out --include <shaders 根> -D SOME_DEFINE
 
 # 查看预处理 + 方言归一之后真正喂给 naga 的 GLSL
-cargo run --bin shader-convert -- normalize <shader> --include <shaders 根>
+cargo run -p shader-convert-cli -- normalize <shader> --include <shaders 根>
 
 # 批量审计一个 shader 目录，退出码 = 失败数
-cargo run --bin shader-convert -- audit <shaders 根> --defines-file tests\fixtures\corpus-defines.json
+cargo run -p shader-convert-cli -- audit <shaders 根> --defines-file tests\fixtures\corpus-defines.json
 ```
 
 `-D` 与 `--defines-file` 可以同时使用：文件里的 `default` 先铺开，再叠加路径后缀命中的条目，最后命令行 `-D` 覆盖。

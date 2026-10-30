@@ -6,13 +6,17 @@
 //! emitted HLSL is performed.
 //!
 //! Rewrites, in order:
-//! 1. `const vec2[] a = vec2[](1, 2);` -> sized array (naga needs a length).
-//! 2. `uniform Globals { ... };` -> `layout(binding = N) uniform Globals { ... };`
-//! 3. `uniform sampler2D S;` -> `uniform texture2D S;` + `uniform sampler S_sampler;`
+//! 1. `gl_VertexIndex` -> `int(gl_VertexIndex)` (naga models it as `u32`).
+//! 2. `const int n = <expr>; a[n]` -> `a[(<expr>)]` (array sizes must be constant).
+//! 3. `const vec2[] a = vec2[](1, 2);` -> sized array (naga needs a length).
+//! 4. `uniform isamplerBuffer X;` -> a read-only storage buffer of 32-bit elements,
+//!    and `texelFetch(X, i).r` -> `X_buf.data[(i)]`.
+//! 5. `uniform Globals { ... };` -> `layout(binding = N) uniform Globals { ... };`
+//! 6. `uniform sampler2D S;` -> `uniform texture2D S;` + `uniform sampler S_sampler;`
 //!    with distinct bindings (naga rejects a shared binding).
-//! 4. `vec4 f(sampler2D src, ...)` -> `vec4 f(texture2D src, sampler src_sampler, ...)`
+//! 7. `vec4 f(sampler2D src, ...)` -> `vec4 f(texture2D src, sampler src_sampler, ...)`
 //!    plus a matching extra argument at every call site.
-//! 5. `texture(S, uv)` -> `texture(sampler2D(S, S_sampler), uv)`.
+//! 8. `texture(S, uv)` -> `texture(sampler2D(S, S_sampler), uv)`.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -22,6 +26,9 @@ use crate::lexer::{self, Kind, Token};
 /// the uniform blocks that are numbered from zero.
 const TEXTURE_BINDING_BASE: u32 = 16;
 const SAMPLER_BINDING_BASE: u32 = 17;
+/// Lowered buffer textures become storage buffers; keep their bindings clear of
+/// both uniform blocks and split samplers.
+const STORAGE_BINDING_BASE: u32 = 48;
 
 const TEXTURE_FUNCTIONS: &[&str] = &[
     "texture",
@@ -74,10 +81,25 @@ pub struct UniformBlock {
     pub binding: u32,
 }
 
+/// A GLSL buffer texture (`samplerBuffer`) rewritten as a read-only storage
+/// buffer, because neither Naga nor HLSL has a type for texel buffers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BufferTexture {
+    /// Name of the original `uniform isamplerBuffer` variable.
+    pub uniform: String,
+    /// Instance name of the generated `buffer` block.
+    pub instance: String,
+    /// Block binding, in the storage-buffer range.
+    pub binding: u32,
+    /// Element type of the generated array (`int`, `uint` or `float`).
+    pub element: &'static str,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct DialectInfo {
     pub combined_samplers: Vec<CombinedSampler>,
     pub uniform_blocks: Vec<UniformBlock>,
+    pub buffer_textures: Vec<BufferTexture>,
     pub warnings: Vec<String>,
 }
 
@@ -95,6 +117,7 @@ pub fn normalize(mut tokens: Vec<Token>) -> Result<(Vec<Token>, DialectInfo), Er
     tokens = cast_vertex_index(tokens);
     tokens = inline_const_array_sizes(tokens);
     size_unsized_arrays(&mut tokens)?;
+    lower_buffer_textures(&mut tokens, &mut info)?;
     add_block_bindings(&mut tokens, &mut info);
     split_combined_samplers(&mut tokens, &mut info)?;
 
@@ -123,6 +146,7 @@ pub fn normalize(mut tokens: Vec<Token>) -> Result<(Vec<Token>, DialectInfo), Er
 
     tokens = inject_sampler_arguments(tokens, &sampler_map, &split_functions)?;
     tokens = wrap_texture_calls(tokens, &sampler_map, &constructors)?;
+    rewrite_buffer_texture_fetches(&mut tokens, &info.buffer_textures)?;
 
     Ok((tokens, info))
 }
@@ -408,9 +432,10 @@ fn split_combined_samplers(tokens: &mut Vec<Token>, info: &mut DialectInfo) -> R
                 )));
             }
             "samplerBuffer" | "isamplerBuffer" | "usamplerBuffer" => {
-                return Err(Error::Unsupported(
-                    "buffer textures are not supported yet".to_owned(),
-                ));
+                return Err(Error::Unsupported(format!(
+                    "buffer texture `{}` was not lowered by `lower_buffer_textures`",
+                    tokens[type_index + 1].text
+                )));
             }
             _ => continue,
         };
@@ -852,6 +877,186 @@ fn wrap_texture_calls(
     Ok(out)
 }
 
+/// Rewrites GLSL buffer textures (`uniform isamplerBuffer CloudFaces;`) as a
+/// read-only storage buffer. Neither naga nor HLSL has a texel-buffer type, so
+/// the declaration becomes an `int[]` block and every `texelFetch` reads the
+/// array directly. The block gets a named instance so the emitted HLSL variable
+/// has a predictable name for the host to bind.
+fn lower_buffer_textures(tokens: &mut Vec<Token>, info: &mut DialectInfo) -> Result<(), Error> {
+    let mut search = 0;
+    while let Some(uniform) = find_ident(tokens, search, "uniform") {
+        let Some(first) = lexer::next_significant(tokens, uniform + 1) else {
+            break;
+        };
+        let type_index = if matches!(tokens[first].text.as_str(), "lowp" | "mediump" | "highp") {
+            match lexer::next_significant(tokens, first + 1) {
+                Some(index) => index,
+                None => break,
+            }
+        } else {
+            first
+        };
+        let element = match tokens[type_index].text.as_str() {
+            "samplerBuffer" => "float",
+            "isamplerBuffer" => "int",
+            "usamplerBuffer" => "uint",
+            _ => {
+                search = uniform + 1;
+                continue;
+            }
+        };
+        let Some(name_index) = lexer::next_significant(tokens, type_index + 1) else {
+            break;
+        };
+        let Some(semicolon) = lexer::next_significant(tokens, name_index + 1) else {
+            break;
+        };
+        if tokens[name_index].kind != Kind::Ident || !lexer::is_symbol(&tokens[semicolon], ";") {
+            return Err(Error::Malformed(format!(
+                "`{}` is not declared as a plain `uniform <buffer sampler> <name>;`",
+                tokens[name_index].text
+            )));
+        }
+        let line = tokens[name_index].line;
+        let uniform_name = tokens[name_index].text.clone();
+        let block = format!("{uniform_name}Buffer");
+        let instance = format!("{uniform_name}_buf");
+        let binding = STORAGE_BINDING_BASE + info.buffer_textures.len() as u32;
+        let declaration = vec![
+            ident("layout", line),
+            symbol("(", line),
+            ident("std430", line),
+            symbol(",", line),
+            space(line),
+            ident("binding", line),
+            space(line),
+            symbol("=", line),
+            space(line),
+            number(binding, line),
+            symbol(")", line),
+            space(line),
+            ident("readonly", line),
+            space(line),
+            ident("buffer", line),
+            space(line),
+            ident(&block, line),
+            space(line),
+            symbol("{", line),
+            space(line),
+            ident(element, line),
+            space(line),
+            ident("data", line),
+            symbol("[", line),
+            symbol("]", line),
+            symbol(";", line),
+            space(line),
+            symbol("}", line),
+            space(line),
+            ident(&instance, line),
+            symbol(";", line),
+        ];
+        tokens.splice(uniform..=semicolon, declaration);
+        info.warnings.push(format!(
+            "`{uniform_name}` is a texel buffer of `{element}`; lowered to a read-only storage buffer read as 32-bit elements"
+        ));
+        info.buffer_textures.push(BufferTexture {
+            uniform: uniform_name,
+            instance,
+            binding,
+            element,
+        });
+        search = uniform + 1;
+    }
+    Ok(())
+}
+
+/// Rewrites `texelFetch(CloudFaces, index).r` as `CloudFaces_buf.data[(index)]`.
+fn rewrite_buffer_texture_fetches(
+    tokens: &mut Vec<Token>,
+    textures: &[BufferTexture],
+) -> Result<(), Error> {
+    if textures.is_empty() {
+        return Ok(());
+    }
+    let mut search = 0;
+    while let Some(fetch) = find_ident(tokens, search, "texelFetch") {
+        let Some(open) = lexer::next_significant(tokens, fetch + 1) else {
+            break;
+        };
+        if !lexer::is_symbol(&tokens[open], "(") {
+            search = fetch + 1;
+            continue;
+        }
+        let Some(image_index) = lexer::next_significant(tokens, open + 1) else {
+            break;
+        };
+        let Some(texture) = textures
+            .iter()
+            .find(|texture| lexer::is_ident(&tokens[image_index], &texture.uniform))
+        else {
+            search = fetch + 1;
+            continue;
+        };
+        let Some(comma) = lexer::next_significant(tokens, image_index + 1) else {
+            break;
+        };
+        if !lexer::is_symbol(&tokens[comma], ",") {
+            return Err(Error::Malformed(format!(
+                "texelFetch on `{}` is missing its index argument",
+                texture.uniform
+            )));
+        }
+        let Some(close) = matching_close(tokens, open) else {
+            return Err(Error::Malformed("unterminated texelFetch".to_owned()));
+        };
+        if tokens[comma + 1..close]
+            .iter()
+            .any(|item| lexer::is_symbol(item, ","))
+        {
+            return Err(Error::Unsupported(format!(
+                "texelFetch on buffer texture `{}` takes exactly one index argument",
+                texture.uniform
+            )));
+        }
+        let line = tokens[fetch].line;
+        let index = trim_trailing_trivia(trim_leading_trivia(&tokens[comma + 1..close])).to_vec();
+        let mut replacement = vec![
+            ident(&texture.instance, line),
+            symbol(".", line),
+            ident("data", line),
+            symbol("[", line),
+            symbol("(", line),
+        ];
+        replacement.extend(index);
+        replacement.extend([symbol(")", line), symbol("]", line)]);
+
+        let Some(dot) = lexer::next_significant(tokens, close + 1) else {
+            return Err(Error::Unsupported(format!(
+                "`texelFetch` on buffer texture `{}` must select a component",
+                texture.uniform
+            )));
+        };
+        if !lexer::is_symbol(&tokens[dot], ".") {
+            return Err(Error::Unsupported(format!(
+                "`texelFetch` on buffer texture `{}` must select a component",
+                texture.uniform
+            )));
+        }
+        let Some(component) = lexer::next_significant(tokens, dot + 1) else {
+            return Err(Error::Malformed("dangling `.` after texelFetch".to_owned()));
+        };
+        if !matches!(tokens[component].text.as_str(), "r" | "x") {
+            return Err(Error::Unsupported(format!(
+                "buffer texture `{}` reads `.{}`; only `.r`/`.x` are supported",
+                texture.uniform, tokens[component].text
+            )));
+        }
+        tokens.splice(fetch..=component, replacement);
+        search = fetch + 1;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -912,5 +1117,23 @@ mod tests {
         let (tokens, _) = normalize(tokens).unwrap();
         let text = lexer::render(&tokens);
         assert!(text.contains("samples[(8 / 4)]"), "{text}");
+    }
+
+    #[test]
+    fn lowers_buffer_texture_to_storage_buffer() {
+        let tokens = lexer::tokenize(
+            "uniform isamplerBuffer CloudFaces;\nvoid main() { int v = texelFetch(CloudFaces, 3).r; }\n",
+        );
+        let (tokens, info) = normalize(tokens).unwrap();
+        assert_eq!(info.buffer_textures.len(), 1);
+        assert_eq!(info.buffer_textures[0].binding, STORAGE_BINDING_BASE);
+        let text = lexer::render(&tokens);
+        assert!(
+            text.contains(
+                "layout(std430, binding = 48) readonly buffer CloudFacesBuffer { int data[]; } CloudFaces_buf;"
+            ),
+            "{text}"
+        );
+        assert!(text.contains("CloudFaces_buf.data[(3)]"), "{text}");
     }
 }

@@ -193,9 +193,16 @@ pub fn build(
                 });
             }
             ResourceKind::ConstantBuffer | ResourceKind::StorageBuffer => {
+                let hlsl_type = match resource.kind {
+                    ResourceKind::ConstantBuffer => type_name(module, variable.ty),
+                    // Lowered buffer textures are read-only storage buffers, which
+                    // naga emits as a single ByteAddressBuffer.
+                    ResourceKind::StorageBuffer => "ByteAddressBuffer".to_owned(),
+                    _ => unreachable!("guarded by the outer match"),
+                };
                 let buffer = BufferBinding {
                     name,
-                    hlsl_type: type_name(module, variable.ty),
+                    hlsl_type,
                     register: resource.register,
                     space: resource.space,
                     group: binding.group,

@@ -99,6 +99,20 @@ struct Frame {
 }
 
 pub fn preprocess(path: &Path, options: &PreprocessOptions) -> Result<Preprocessed, Error> {
+    let source = std::fs::read_to_string(path).map_err(|source| Error::Io {
+        path: path.to_owned(),
+        source,
+    })?;
+    preprocess_source(path, &source, options)
+}
+
+/// Preprocesses source text whose includes still resolve relative to `path`.
+/// The C ABI uses this so a host can pass the shader text instead of a file.
+pub fn preprocess_source(
+    path: &Path,
+    source: &str,
+    options: &PreprocessOptions,
+) -> Result<Preprocessed, Error> {
     let mut preprocessor = Preprocessor {
         macros: options
             .defines
@@ -124,7 +138,7 @@ pub fn preprocess(path: &Path, options: &PreprocessOptions) -> Result<Preprocess
         source,
     })?;
     preprocessor.stack.push(entry);
-    preprocessor.process_file(path)?;
+    preprocessor.process_text(path, source)?;
     preprocessor.stack.pop();
 
     if !preprocessor.emitted_version {
@@ -163,6 +177,10 @@ impl Preprocessor {
             path: path.to_owned(),
             source,
         })?;
+        self.process_text(path, &source)
+    }
+
+    fn process_text(&mut self, path: &Path, source: &str) -> Result<(), Error> {
         let mut frames: Vec<Frame> = Vec::new();
         let last_line = source.lines().count() as u32;
 

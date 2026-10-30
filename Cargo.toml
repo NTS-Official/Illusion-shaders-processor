@@ -2,6 +2,12 @@
 name = "Illusion-shaders-extension"
 version = "0.0.1"
 edition = "2024"
+description = "GLSL to HLSL conversion for the Illusion shader pipeline, exposed as a C ABI."
+
+[lib]
+# The release artifact is the CDLL; the rlib exists so the development CLI can link it.
+name = "illusion_shader"
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 naga = { path = "../naga-for-hlsl/naga", features = ["glsl-in", "hlsl-out"] }
@@ -9,6 +15,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 
-[[bin]]
-name = "shader-convert"
-path = "src/bin/shader-convert.rs"
+[workspace]
+# `shader-convert` is a development tool: it is not built by `cargo build` at the
+# root, so release builds only produce the DLL.
+members = [".", "cli"]
+default-members = ["."]
+resolver = "3"

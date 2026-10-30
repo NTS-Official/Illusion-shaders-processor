@@ -36,7 +36,9 @@ impl Default for CompileOptions {
             texture_register_base: 0,
             sampler_register_base: 0,
             cbuffer_register_base: 0,
-            storage_register_base: 0,
+            // Read-only storage buffers land in the `t` register space, so they
+            // must not overlap the textures that start at `t0`.
+            storage_register_base: 32,
         }
     }
 }
@@ -81,18 +83,45 @@ pub fn stage_from_path(path: &Path) -> Option<ShaderStage> {
     }
 }
 
+impl Error {
+    /// Stable tag for the C ABI error response; the host may branch on it.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Error::Preprocess(_) => "preprocess",
+            Error::Dialect(_) => "dialect",
+            Error::Frontend(_) => "glsl-frontend",
+            Error::Validation(_) => "validation",
+            Error::Backend(_) => "hlsl-backend",
+            Error::MissingEntryPoint(_) => "missing-entry-point",
+            Error::Io { .. } => "io",
+        }
+    }
+}
+
 pub fn compile(
     path: &Path,
     stage: ShaderStage,
     options: &CompileOptions,
 ) -> Result<CompiledShader, Error> {
-    let preprocessed = preprocess::preprocess(
-        path,
-        &preprocess::PreprocessOptions {
-            include_roots: options.include_roots.clone(),
-            defines: options.defines.clone(),
-        },
-    )?;
+    compile_with_source(path, None, stage, options)
+}
+
+/// Compiles a shader, optionally from source text instead of the file at
+/// `path`. Includes still resolve relative to `path`.
+pub fn compile_with_source(
+    path: &Path,
+    source: Option<&str>,
+    stage: ShaderStage,
+    options: &CompileOptions,
+) -> Result<CompiledShader, Error> {
+    let preprocess_options = preprocess::PreprocessOptions {
+        include_roots: options.include_roots.clone(),
+        defines: options.defines.clone(),
+    };
+    let preprocessed = match source {
+        Some(source) => preprocess::preprocess_source(path, source, &preprocess_options)?,
+        None => preprocess::preprocess(path, &preprocess_options)?,
+    };
 
     let tokens = lexer::tokenize(&preprocessed.text);
     let (tokens, dialect_info) = dialect::normalize(tokens)?;

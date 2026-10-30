@@ -18,8 +18,8 @@ use std::process::ExitCode;
 
 use naga::back::hlsl::ShaderModel;
 
-use Illusion_shaders_extension::compile::{self, CompileOptions};
-use Illusion_shaders_extension::{dialect, lexer, preprocess};
+use illusion_shader::compile::{self, CompileOptions};
+use illusion_shader::{dialect, lexer, preprocess};
 
 const USAGE: &str = "\
 shader-convert convert <file> --out <dir> [--include <dir>]... [-D NAME[=VALUE]]... [--stage vert|frag] [--dump-glsl]
