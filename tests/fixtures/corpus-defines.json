@@ -1,0 +1,18 @@
+{
+  "default": {
+    "OIT_COEFF_COUNT": "8",
+    "OIT_COEFF_ATTACHMENT_COUNT": "2",
+    "OIT_WAVELET_RANK": "2"
+  },
+  "core/oit_composite.fsh": {
+    "OIT": null
+  },
+  "core/oit_depth_bounds_cull.fsh": {
+    "OIT": null,
+    "OIT_ALPHA_ONLY": null,
+    "OIT_DEPTH_BOUNDS": null
+  },
+  "core/rendertype_end_portal.fsh": {
+    "PORTAL_LAYERS": "15"
+  }
+}
