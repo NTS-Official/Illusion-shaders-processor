@@ -20,13 +20,14 @@ use naga::back::hlsl::ShaderModel;
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::compile::{self, CompileOptions, CompiledShader};
+use crate::compile::{self, CompileOptions, CompiledShader, RegisterLayout};
 use crate::compile::{Error as CompileError, stage_from_path};
 
 /// Bumped whenever the request or response schema changes incompatibly.
 pub const ABI_VERSION: u32 = 1;
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ConvertRequest {
     /// Shader path: names the shader and anchors relative `#include`s.
     path: String,
@@ -47,6 +48,34 @@ struct ConvertRequest {
     shader_model: Option<String>,
     #[serde(default)]
     space: Option<u8>,
+    /// `spirv` (default) or `host`. `host` numbers registers the way the host's
+    /// `D3D12BindGroupEntry` list does, which is what rendering needs.
+    #[serde(default)]
+    register_layout: Option<String>,
+    /// Exact register per resource name; the host knows the merged entry list and
+    /// overrides the sequential `host` numbering with these numbers.
+    #[serde(default)]
+    bindings: BTreeMap<String, u32>,
+    /// Vertex attribute names in input-layout order, so the emitted `LOC<n>` semantics line up
+    /// with the vertex format elements.
+    #[serde(default)]
+    vertex_attributes: Vec<String>,
+    /// Flipped D3D clip space: the converter appends `gl_Position.y = -gl_Position.y;` after every
+    /// clip-space write instead of the host patching the HLSL text.
+    #[serde(default)]
+    flip_y: bool,
+    /// Global fragment input whose `.y` is flipped (lightmap pass); omitted when absent.
+    #[serde(default)]
+    flip_texcoord: Option<String>,
+    /// Collect loose uniforms into this `std140` block (shader packs).
+    uniform_block: Option<String>,
+    /// Rewrite fixed-function GLSL builtins that shader packs still use.
+    #[serde(default)]
+    legacy_builtins: bool,
+    /// Vertex stage outputs in declaration order; a fragment conversion pads its inputs to this
+    /// interface so D3D12 packs both signatures the same way. Omitted for other stages.
+    #[serde(default)]
+    vertex_outputs: Vec<crate::stage_io::StageOutput>,
 }
 
 fn default_entry() -> String {
@@ -144,9 +173,19 @@ fn convert(request: &ConvertRequest) -> Result<CompiledShader, CompileError> {
     };
     let shader_model = match &request.shader_model {
         Some(name) => parse_shader_model(name).ok_or_else(|| {
-            CompileError::Frontend(format!("unknown shader model `{name}`; expected 6_0 .. 6_9"))
+            CompileError::Frontend(format!(
+                "unknown shader model `{name}`; expected 6_0 .. 6_9"
+            ))
         })?,
         None => ShaderModel::V6_0,
+    };
+    let register_layout = match &request.register_layout {
+        Some(name) => RegisterLayout::from_name(name).ok_or_else(|| {
+            CompileError::Frontend(format!(
+                "unknown register layout `{name}`; expected spirv or host"
+            ))
+        })?,
+        None => RegisterLayout::SpirvBases,
     };
     let options = CompileOptions {
         include_roots: request.include_roots.iter().map(PathBuf::from).collect(),
@@ -154,6 +193,14 @@ fn convert(request: &ConvertRequest) -> Result<CompiledShader, CompileError> {
         entry_point: request.entry.clone(),
         shader_model,
         space: request.space.unwrap_or(0),
+        register_layout,
+        bindings: request.bindings.clone(),
+        vertex_attributes: request.vertex_attributes.clone(),
+        flip_y: request.flip_y,
+        flip_texcoord: request.flip_texcoord.clone(),
+        uniform_block: request.uniform_block.clone(),
+        legacy_builtins: request.legacy_builtins,
+        vertex_outputs: request.vertex_outputs.clone(),
         ..Default::default()
     };
     compile::compile_with_source(&path, request.source.as_deref(), stage, &options)
@@ -198,6 +245,25 @@ mod tests {
 layout(std140) uniform Globals { vec4 Color; };
 out vec4 fragColor;
 void main() { fragColor = Color; }
+";
+
+    const TEXTURED_FRAGMENT: &str = r"
+#version 330
+layout(std140) uniform Globals { vec4 Tint; };
+uniform sampler2D Sampler0;
+layout(location = 0) in vec2 texCoord;
+out vec4 fragColor;
+void main() { fragColor = texture(Sampler0, texCoord) * Tint; }
+";
+
+    const VERTEX: &str = r"
+#version 330
+in vec3 Position;
+out vec4 vertexColor;
+void main() {
+    vertexColor = vec4(1.0);
+    gl_Position = vec4(Position, 1.0);
+}
 ";
 
     /// Calls the C entry points exactly as a host would.
@@ -249,9 +315,96 @@ void main() { fragColor = Color; }
     }
 
     #[test]
+    fn rejects_unknown_request_fields() {
+        let (code, response) = call_abi(r#"{"path":"x.fsh","register_layout":"host","mystery":1}"#);
+        assert_eq!(code, 1, "{response}");
+        assert_eq!(response["ok"], false);
+        assert_eq!(response["kind"], "request");
+        assert!(
+            response["message"].as_str().unwrap().contains("mystery"),
+            "{response}"
+        );
+    }
+    #[test]
     fn rejects_malformed_requests() {
         let (code, response) = call_abi("{\"path\": 1}");
         assert_eq!(code, 1);
         assert_eq!(response["kind"], "request");
+    }
+
+    /// Every documented request field must reach the compiler. A field that serde silently
+    /// ignores is invisible at runtime, which is how the `bindings` field was once dropped.
+    #[test]
+    fn honours_every_documented_request_field() {
+        let request = json!({
+            "path": "core/contract.fsh",
+            "source": TEXTURED_FRAGMENT,
+            "stage": "fragment",
+            "entry": "main",
+            "include_roots": [],
+            "defines": {},
+            "shader_model": "6_9",
+            "space": 0,
+            "register_layout": "host",
+            "bindings": { "Globals": 3, "Sampler0": 7 },
+            "vertex_attributes": [],
+            "flip_y": false,
+            "flip_texcoord": "texCoord"
+        });
+        let (code, response) = call_abi(&request.to_string());
+        assert_eq!(code, 0, "{response}");
+        let hlsl = response["hlsl"].as_str().expect("hlsl");
+        for expected in [
+            "cbuffer global : register(b3)",
+            "register(t7)",
+            "register(s7)",
+            "texCoordFlipped",
+        ] {
+            assert!(hlsl.contains(expected), "missing {expected} in:\n{hlsl}");
+        }
+
+        let vertex = json!({
+            "path": "core/contract.vsh",
+            "source": VERTEX,
+            "stage": "vertex",
+            "flip_y": true
+        });
+        let (code, response) = call_abi(&vertex.to_string());
+        assert_eq!(code, 0, "{response}");
+        let hlsl = response["hlsl"].as_str().expect("hlsl");
+        assert!(hlsl.contains("gl_Position.y"), "{hlsl}");
+    }
+
+    /// The vertex stage's interface decides which fragment inputs exist: D3D12 packs each stage's
+    /// inputs on its own, so a fragment that skips an input the vertex writes links only if the
+    /// converter fills it in. This drives that field over the ABI.
+    #[test]
+    fn pads_fragment_inputs_from_the_vertex_outputs() {
+        let request = json!({
+            "path": "core/stage_pad.fsh",
+            "source": "#version 450\nlayout(location = 1) in vec2 uv;\nlayout(location = 0) out vec4 color;\nvoid main() { color = vec4(uv, 0.0, 1.0); }\n",
+            "stage": "fragment",
+            "include_roots": [],
+            "defines": {},
+            "vertex_outputs": [
+                { "location": 0, "hlsl_type": "float", "interpolation": "Perspective" },
+                { "location": 1, "hlsl_type": "float2", "interpolation": "Perspective" }
+            ]
+        });
+        let (code, response) = call_abi(&request.to_string());
+        assert_eq!(code, 0, "{response}");
+        let hlsl = response["hlsl"].as_str().expect("hlsl");
+        for expected in ["dxr_pad0", "LOC0", "LOC1"] {
+            assert!(hlsl.contains(expected), "missing {expected} in:\n{hlsl}");
+        }
+        let warnings = response["manifest"]["warnings"]
+            .as_array()
+            .expect("warnings");
+        assert!(
+            warnings.iter().any(|warning| warning
+                .as_str()
+                .is_some_and(|text| text.contains("padded 1 fragment input"))),
+            "{warnings:?}"
+        );
     }
 }

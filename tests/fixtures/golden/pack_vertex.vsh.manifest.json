@@ -1,0 +1,74 @@
+{
+  "schema": "illusion.shader-manifest/1",
+  "shader": {
+    "name": "pack_vertex.vsh",
+    "stage": "vertex",
+    "entry": "main",
+    "hlsl_file": "pack_vertex.vsh.hlsl",
+    "shader_model": "6_0"
+  },
+  "resources": {
+    "textures": [],
+    "samplers": [],
+    "constant_buffers": [
+      {
+        "name": "constants_CommonUniforms",
+        "hlsl_type": "CommonUniforms",
+        "register": 0,
+        "space": 0,
+        "group": 0,
+        "binding": 0,
+        "size": 128,
+        "members": [
+          {
+            "name": "projectionMatrix",
+            "hlsl_type": "float4x4",
+            "offset": 0,
+            "size": 64
+          },
+          {
+            "name": "modelViewMatrix",
+            "hlsl_type": "float4x4",
+            "offset": 64,
+            "size": 64
+          }
+        ]
+      }
+    ],
+    "storage_buffers": [],
+    "storage_images": []
+  },
+  "stage_io": {
+    "inputs": [
+      {
+        "name": "vaPosition",
+        "location": 0,
+        "hlsl_type": "float3",
+        "interpolation": "Perspective"
+      },
+      {
+        "name": "Position",
+        "location": 1,
+        "hlsl_type": "float3",
+        "interpolation": "Perspective"
+      }
+    ],
+    "outputs": [],
+    "builtins": [
+      {
+        "name": "gl_VertexIndex",
+        "builtin": "VertexIndex",
+        "hlsl_type": "uint"
+      },
+      {
+        "name": "gl_Position",
+        "builtin": "Position { invariant: false }",
+        "hlsl_type": "float4"
+      }
+    ]
+  },
+  "warnings": [
+    "declared 1 compatibility attribute(s): vaPosition",
+    "moved 2 loose uniform(s) into block `CommonUniforms`"
+  ]
+}

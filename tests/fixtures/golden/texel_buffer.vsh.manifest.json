@@ -1,0 +1,48 @@
+{
+  "schema": "illusion.shader-manifest/1",
+  "shader": {
+    "name": "texel_buffer.vsh",
+    "stage": "vertex",
+    "entry": "main",
+    "hlsl_file": "texel_buffer.vsh.hlsl",
+    "shader_model": "6_0"
+  },
+  "resources": {
+    "textures": [],
+    "samplers": [],
+    "constant_buffers": [],
+    "storage_buffers": [
+      {
+        "name": "Faces",
+        "hlsl_type": "ByteAddressBuffer",
+        "register": 0,
+        "space": 0,
+        "group": 0,
+        "binding": 48,
+        "size": 0,
+        "members": []
+      }
+    ],
+    "storage_images": []
+  },
+  "stage_io": {
+    "inputs": [],
+    "outputs": [],
+    "builtins": [
+      {
+        "name": "gl_VertexIndex",
+        "builtin": "VertexIndex",
+        "hlsl_type": "uint"
+      },
+      {
+        "name": "gl_Position",
+        "builtin": "Position { invariant: false }",
+        "hlsl_type": "float4"
+      }
+    ]
+  },
+  "warnings": [
+    "dropped 1 gl_PointSize assignment(s): D3D12 has no point size",
+    "`Faces` is a texel buffer of `int`; lowered to a read-only storage buffer read one byte per texel"
+  ]
+}

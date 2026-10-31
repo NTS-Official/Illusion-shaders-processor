@@ -1,0 +1,79 @@
+{
+  "schema": "illusion.shader-manifest/1",
+  "shader": {
+    "name": "constant_buffer.fsh",
+    "stage": "fragment",
+    "entry": "main",
+    "hlsl_file": "constant_buffer.fsh.hlsl",
+    "shader_model": "6_0"
+  },
+  "resources": {
+    "textures": [
+      {
+        "name": "Sky",
+        "hlsl_type": "TextureCube<float4>",
+        "register": 1,
+        "space": 0,
+        "group": 0,
+        "binding": 16
+      }
+    ],
+    "samplers": [
+      {
+        "name": "Sky_sampler",
+        "register": 1,
+        "space": 0,
+        "group": 0,
+        "binding": 17,
+        "comparison": false,
+        "texture": "Sky"
+      }
+    ],
+    "constant_buffers": [
+      {
+        "name": "constants_Globals",
+        "hlsl_type": "Globals",
+        "register": 0,
+        "space": 0,
+        "group": 0,
+        "binding": 0,
+        "size": 84,
+        "members": [
+          {
+            "name": "Color",
+            "hlsl_type": "float4",
+            "offset": 0,
+            "size": 16
+          },
+          {
+            "name": "View",
+            "hlsl_type": "float4x4",
+            "offset": 16,
+            "size": 64
+          },
+          {
+            "name": "Time",
+            "hlsl_type": "float",
+            "offset": 80,
+            "size": 4
+          }
+        ]
+      }
+    ],
+    "storage_buffers": [],
+    "storage_images": []
+  },
+  "stage_io": {
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "fragColor",
+        "location": 0,
+        "hlsl_type": "float4",
+        "interpolation": "Perspective"
+      }
+    ],
+    "builtins": []
+  },
+  "warnings": []
+}

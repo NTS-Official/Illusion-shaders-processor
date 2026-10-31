@@ -1,0 +1,45 @@
+{
+  "schema": "illusion.shader-manifest/1",
+  "shader": {
+    "name": "stage_pad.fsh",
+    "stage": "fragment",
+    "entry": "main",
+    "hlsl_file": "stage_pad.fsh.hlsl",
+    "shader_model": "6_0"
+  },
+  "resources": {
+    "textures": [],
+    "samplers": [],
+    "constant_buffers": [],
+    "storage_buffers": [],
+    "storage_images": []
+  },
+  "stage_io": {
+    "inputs": [
+      {
+        "name": "dxr_pad0",
+        "location": 0,
+        "hlsl_type": "float",
+        "interpolation": "Perspective"
+      },
+      {
+        "name": "uv",
+        "location": 1,
+        "hlsl_type": "float2",
+        "interpolation": "Perspective"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "color",
+        "location": 0,
+        "hlsl_type": "float4",
+        "interpolation": "Perspective"
+      }
+    ],
+    "builtins": []
+  },
+  "warnings": [
+    "padded 1 fragment input(s) so the stage interface packs like the vertex stage"
+  ]
+}

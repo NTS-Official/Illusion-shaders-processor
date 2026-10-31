@@ -1,14 +1,19 @@
 /target
 
-# 第三方光影包语料：许可证禁止再分发与修改（见 docs/minecraft_glsl_to_hlsl_rust_technical_plan.md §2.6）
+# 第三方光影包语料：许可证禁止再分发与修改（见 docs/README.md 的「外部输入」一节）
 /input/
 
 # 本地参考克隆：只读参考，不入库（Iris = LGPL-3.0，cyntax = MPL-2.0）
 /ref_shader_loader/
 /cyntax/
 
-# §2.7 验证样本的编译产物
+# CLI 的默认输出目录（convert/audit/verify 的产物不入库）
+/out/
+
+# 验证样本的编译产物
 /docs/spike/*.spv
 /docs/spike/*.hlsl
 /docs/spike/*.dxil
 /docs/spike/*.dxil.disasm
+/_tmp43
+/_tmp44

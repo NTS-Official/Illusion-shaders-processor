@@ -1,0 +1,74 @@
+{
+  "schema": "illusion.shader-manifest/1",
+  "shader": {
+    "name": "vertex_inputs.vsh",
+    "stage": "vertex",
+    "entry": "main",
+    "hlsl_file": "vertex_inputs.vsh.hlsl",
+    "shader_model": "6_0"
+  },
+  "resources": {
+    "textures": [
+      {
+        "name": "Sampler",
+        "hlsl_type": "Texture2D<float4>",
+        "register": 0,
+        "space": 0,
+        "group": 0,
+        "binding": 16
+      }
+    ],
+    "samplers": [
+      {
+        "name": "Sampler_sampler",
+        "register": 0,
+        "space": 0,
+        "group": 0,
+        "binding": 17,
+        "comparison": false,
+        "texture": "Sampler"
+      }
+    ],
+    "constant_buffers": [],
+    "storage_buffers": [],
+    "storage_images": []
+  },
+  "stage_io": {
+    "inputs": [
+      {
+        "name": "Position",
+        "location": 0,
+        "hlsl_type": "float3",
+        "interpolation": "Perspective"
+      },
+      {
+        "name": "Color",
+        "location": 2,
+        "hlsl_type": "float4",
+        "interpolation": "Perspective"
+      },
+      {
+        "name": "UV0",
+        "location": 1,
+        "hlsl_type": "float2",
+        "interpolation": "Perspective"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "vertexColor",
+        "location": 0,
+        "hlsl_type": "float4",
+        "interpolation": "Perspective"
+      }
+    ],
+    "builtins": [
+      {
+        "name": "gl_Position",
+        "builtin": "Position { invariant: false }",
+        "hlsl_type": "float4"
+      }
+    ]
+  },
+  "warnings": []
+}

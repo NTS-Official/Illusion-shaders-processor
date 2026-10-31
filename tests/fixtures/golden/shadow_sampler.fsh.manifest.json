@@ -1,0 +1,49 @@
+{
+  "schema": "illusion.shader-manifest/1",
+  "shader": {
+    "name": "shadow_sampler.fsh",
+    "stage": "fragment",
+    "entry": "main",
+    "hlsl_file": "shadow_sampler.fsh.hlsl",
+    "shader_model": "6_0"
+  },
+  "resources": {
+    "textures": [
+      {
+        "name": "ShadowMap",
+        "hlsl_type": "Texture2D<float>",
+        "register": 0,
+        "space": 0,
+        "group": 0,
+        "binding": 16
+      }
+    ],
+    "samplers": [
+      {
+        "name": "ShadowMap_sampler",
+        "register": 0,
+        "space": 0,
+        "group": 0,
+        "binding": 17,
+        "comparison": true,
+        "texture": "ShadowMap"
+      }
+    ],
+    "constant_buffers": [],
+    "storage_buffers": [],
+    "storage_images": []
+  },
+  "stage_io": {
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "fragColor",
+        "location": 0,
+        "hlsl_type": "float4",
+        "interpolation": "Perspective"
+      }
+    ],
+    "builtins": []
+  },
+  "warnings": []
+}

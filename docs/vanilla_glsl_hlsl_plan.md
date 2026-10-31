@@ -4,7 +4,7 @@
 
 ## 1. 结论先行
 
-原版 26.3 的 72 个着色器里，71 个可以直接转成自包含 HLSL（给定每个 pipeline 的宏），1 个是 naga 能力缺口（`gl_PointSize`）。达到这一点**没有修改 naga 的 GLSL 前端**，只加了 HLSL 后端的一个选项；主体工作量在 GLSL 方言归一与资源清单，而不是 IR 设计。
+原版 26.3 的 72 个着色器全部可以转成自包含 HLSL（给定每个 pipeline 的宏），光影包语料里除 24 个外部宿主程序外的 183 个也全部可转换（含 3 个 compute，UAV 产物已可 verify，宿主侧还没有绑定槽位）。达到这一点不需要自研 IR 或前端：naga 的 GLSL 前端、校验器与 HLSL 后端都在用，只在 naga 里补了六处缺陷/能力（见 §3 最后一行），主体工作量在 GLSL 方言归一与资源清单。
 
 因此本期的架构定为：
 
@@ -24,61 +24,40 @@ shaders/ + defines
 
 | 原方案 | 实现后 |
 | --- | --- |
-| “优先复用 Naga，但不视为不可改边界” | naga 只加一个后端开关 `static_samplers`，前端不动 |
-| 方言处理分散在“前端交接契约”里 | 收敛成独立的 `dialect` 层，规则可枚举、可单测（8 条改写，见契约 §3） |
-| 绑定模型作为核心抽象 | 先用 manifest v1 承载；偏移与反射留到 M2，避免臆造 cbuffer 布局 |
-| 目标 HLSL 由 DXC 校验 | M1 先保证“能生成、能通过 naga 校验”，DXC 编译与反射比对放 M2 |
-| 光影包前端同期设计 | 本期不做；双前端仍成立，但共享核心以 manifest 为界 |
+| “优先复用 Naga，但不视为不可改边界” | naga 复用为主，只补六处必要改动：后端 `static_samplers` 选项、`SampleLevel::Zero` 与向量 `select` 的输出、向量 `abs` 的 `select` 形态、GLSL 前端入口函数丢 `local_variables`、校验器对未被引用的表达式过严 |
+| 方言处理分散在“前端交接契约”里 | 收敛成独立的 `dialect` 层，规则可枚举、可单测（19 条改写，见契约 §3） |
+| 绑定模型作为核心抽象 | manifest v1 直接承载寄存器、`space`、cbuffer `size` 与成员 `offset`，宿主按它装配；不引入独立绑定模型 |
+| 目标 HLSL 由 DXC 校验 | 已实现：`verify` 用 DXC 编译并比对资源、入口签名与 cbuffer 布局（见 `verification.md`） |
+| 光影包前端同期设计 | 独立前端已落地（`--uniform-block` / `--legacy-builtins` 等），输出同一套 manifest；双前端共享核心以 manifest 为界 |
 
 ## 3. 组成
 
 | 组件 | 位置 | 职责 |
 | --- | --- | --- |
-| `preprocess` | `src/preprocess.rs` | 递归 include、条件编译、对象式宏、`#version` 归一 |
-| `dialect` | `src/dialect.rs` | 8 条 token 级改写；记录 combined sampler / uniform block / 降级 buffer texture 的 binding 分配 |
+| `preprocess` | `src/preprocess.rs` | 递归 include、条件编译、对象式与函数式宏（含续行）、`#version` 归一 |
+| `dialect` | `src/dialect.rs` | 19 条 token 级改写；记录 combined sampler / uniform block / 降级 buffer texture / MRT 的分配；sampler 覆盖 `1D/1DArray/2D/2DArray/2DMS/2DMSArray/3D/Cube/CubeArray` × `float/int/uint` + 比较采样器 |
 | `lexer` | `src/lexer.rs` | 保空白与注释的 tokenizer，改写后能逐 token 回写 |
 | `compile` | `src/compile.rs` | 串联预处理→改写→naga→HLSL，构造 binding map；非 fragment 着色器把隐式 LOD 采样钳到 `SampleLevel::Zero` |
-| `manifest` | `src/manifest.rs` | 资源与 stage IO 清单（`illusion.shader-manifest/1`） |
+| `manifest` | `src/manifest.rs` | 资源、stage IO、MRT 与 cbuffer 布局清单（`illusion.shader-manifest/1`） |
 | `abi` | `src/abi.rs` | C ABI：`illusion_shader_abi_version` / `illusion_shader_convert` / `illusion_shader_free`；release 产物 `illusion_shader.dll` |
-| `shader-convert` | `cli/src/main.rs` | 仅开发用命令行（`convert` / `audit` / `normalize`），独立 workspace 成员 `shader-convert-cli` |
-| naga 补丁 | `naga-for-hlsl/naga/src/back/hlsl/{mod,writer}.rs` | `Options::static_samplers`：每个 sampler 输出为独立 `SamplerState : register(sN)`，不生成 heap |
+| `verify` | `src/verify.rs` | 把生成的 HLSL 交给 DXC 编译，解析 `-Fc` 汇编里的 `!dx.resources`、DXIL 容器的 `ISG1`/`OSG1` 签名与 `-Zi` 的 `!dx.typeAnnotations`，与 manifest 逐条比对 |
+| `shader-convert` | `cli/src/main.rs` | 仅开发用命令行（`convert` / `audit` / `verify` / `normalize`），独立 workspace 成员 `shader-convert-cli` |
+| naga 补丁 | `naga-for-hlsl/naga/src/` | ① `back/hlsl/mod.rs` + `writer.rs`：`Options::static_samplers` 把 sampler 输出成独立 `SamplerState : register(sN)`（不生成 heap）；`SampleLevel::Zero` 输出 `SampleLevel(s, uv, 0.0)`；向量条件的 `Select` 输出 `select(a, b, cond)`。② `front/glsl/functions.rs`：入口函数继承全局上下文的 `local_variables`。③ `valid/function.rs`：未被引用的死表达式不再报 `UnvisitedExpression` |
 
-naga 补丁是本方案唯一的上游改动；不打开该选项时 naga 行为不变（默认 `false`），因此可以按需回推上游。
+naga 补丁是本方案唯一的上游改动；`static_samplers` 默认关闭时 naga 行为不变，其余四处是缺陷修正，可按需回推上游。
 
 ## 4. 里程碑
 
 | 里程碑 | 内容 | 状态 |
 | --- | --- | --- |
-| M1 转换器 | 预处理、方言归一、naga 直连、HLSL + manifest、C ABI（DLL）、语料审计 | 完成：72 个语料 71 通过；21 个单测通过；`cargo build --release` 只产 `illusion_shader.dll`，CLI 仅 debug 构建；`cargo clippy` 只剩 1 条既有 warning（`rt_light_contract::next`） |
-| M2 校验闭环 | 用 DXC 编译产物（SM 6.0+），拿 reflection 与 manifest 比对；补 `gl_PointSize` 缺口 | 待做 |
-| M3 宿主接回 | 替换 `D3D12ShaderCompiler.createIntermediary` 的中间层；根签名改为 static sampler + 显式 cbuffer | 待做（本期禁止改宿主源码） |
-| M4 光影包前端 | 独立前端，输出同一套 manifest | 未开始 |
+| M1 转换器 | 预处理、方言归一、naga 直连、HLSL + manifest、C ABI（DLL）、语料审计 | 完成：72 个语料 72 通过；109 条测试通过（95 个单测、4 条命令行选项用例、17 份 HLSL/manifest 快照见 `tests\fixtures\golden`、`tests\deterministic.rs` 钉住同样的输入产出逐字节相同的 HLSL/manifest、3 条 `tests\diagnostics.rs` 断言错误消息带 `文件:行号`、4 条 `tests\robustness.rs` 残缺输入用例要求报错而不是 panic）；`cargo build --release` 只产 `illusion_shader.dll`，CLI 仅 debug 构建；`cargo clippy` 只剩 1 条既有 warning（`rt_light_contract::next`） |
+| M2 校验闭环 | 用 DXC 编译产物（SM 6.0+），拿 reflection 与 manifest 比对 | 完成：`verify` 已实现，72 个语料在 SM 6.0 与 6.9 下 DXC 编译通过，register/space/类型族、stage IO（含打包输出）与 cbuffer 成员偏移（`-Zi` 的 `!dx.typeAnnotations`）都与 manifest 一致 |
+| M3 宿主接回 | 替换 `D3D12ShaderCompiler.createIntermediary` 的中间层；根签名改为 static sampler + 显式 cbuffer | **shadow + primary 均已落地**：`gui` / `position` / `text` 家族在标题界面视觉正确；世界内把 `shaderConverterPipelines` 留空时 **221 条管线**切到转换器（含 `solid_block`、`cutout_block`、`opaque_particle`、7 个资源的 `item_cutout`(flipY)、天空、云（`CloudFaces` 走 RAW SRV）、`blit_depth`、天气、OIT 系列、12 条地形），片段输入按顶点输出补齐后图集烘制也转正，地形由转换器产物建出 meshlet 变体（两种 VS 形态 + AS 剔除），`CreateGraphicsPipelineState` 失败 0 次、`terrain batch skipped` 0 次。旧链（shaderc + SPIRV-Cross）保留为回退。未切：无按类别跳过 |
+| M4 光影包前端 | 独立前端，输出同一套 manifest | **已落地（验收范围）**：Complementary r5.8.1 的 219 个入口文件（216 个 `.vsh/.fsh` + 3 个 `.csh`）带 `--uniform-block CommonUniforms --legacy-builtins --defines-file tests\fixtures\pack-compute-defines.json` 为 **195 compiled / 24 failed**——24 个全是外部宿主程序（Colorwheel 12 / Distant Horizons 12）；排除它们后 **183/183**，183 个全部通过 `verify`（SM 6.0 与 6.9，含 3 个 compute 的 UAV 组）。宿主侧带 storage image 的管线按 `storage image` 跳过（绑定层还没有 UAV 槽位）。前端契约与验收口径见 [shader_pack_frontend.md](shader_pack_frontend.md)，语料现状见契约 §6.1 |
 
-M2 的退出条件：72/72 语料经 DXC 编译成功，reflection 的 `register` 与 manifest 完全一致；`terrain`/`clouds`/`oit_*` 三个代表性 pipeline 的 VS/PS 语义配对正确。
 
-## 5. 验证方式
 
-- 单测：lexer、preprocess、dialect（含 binding 分配、sampler 拆分、const 数组长度）、abi（走真实 C 入口收发 JSON）。
-- 发布物：`cargo build --release` 后 `target\release\illusion_shader.dll` 存在，且 release 目录里没有 exe；`cargo build -p shader-convert-cli` 才产出 `shader-convert.exe`。
-- 语料审计：`cargo run -p shader-convert-cli -- audit <shaders> --defines-file tests/fixtures/corpus-defines.json`；退出码 = 失败数。
-- 人工抽查：`convert ... --dump-glsl` 同时落盘归一化 GLSL，用于判断失败是“方言没覆盖”还是“naga 能力缺口”。
 
-语料与 defines 都不进 git 之外的位置：语料取自工作区的反编译源码，defines 是仓库内 JSON，任何一条都能追溯到 `RenderPipelines.java` 的 `withShaderDefine`。
 
-## 6. 风险
 
-| 风险 | 现状 | 处理 |
-| --- | --- | --- |
-| 能力缺口：`gl_PointSize` | 1 个语料失败（`debug_point.vsh`），HLSL 无对应输出语义 | M2 丢弃该输出并在 manifest `warnings` 记一条，或在 fork 里补 |
-| 降级 buffer texture 的元素宽度 | `CloudFaces` 原为 `R8_SINT` texel buffer，降级后按 32 位 `int` 读取 | 契约 §7 要求宿主提供 `R32_SINT` 视图；M2 的 DXC reflection 校验会暴露绑定不符 |
-| 依赖 naga 内部 IR 语义（`AddressSpace`、`SampleLevel`） | 已发生一次（顶点采样钳位） | 把这类适配集中在 `compile.rs`，并在契约里写明；升级 naga 时只需重跑语料审计 |
-| HLSL 标识符被 naga 重命名 | `Sampler2` → `Sampler2_` | manifest 记录 IR 名，宿主以 HLSL 声明为准；M2 由 reflection 兜底 |
-| cbuffer 布局 | naga 按 std140 插 pad 字段 | 契约要求宿主按 std140 写；M2 用 reflection 验证，不自行推算 |
-| 宏集合漂移 | defines 是输入契约 | 每个 pipeline 的宏从 `RenderPipelines.java` 抄；语料审计作为回归 |
 
-## 7. 下一步（按顺序）
-
-1. 在 M2 接 DXC：`dxcompiler.dll` 已随宿主发行，转换器侧只需要一个可选的 `--dxc` 校验开关（外部进程或 FFI，二选一，不引入新依赖）。
-2. 补 `gl_PointSize` 缺口：丢弃该输出并写进 manifest 的 `warnings`（语料只有 `debug_point.vsh`）。
-3. 与宿主对齐根签名：static sampler + 显式 cbuffer 寄存器；这需要一份“manifest → root signature”的映射表，放宿主侧实现。
-4. 之后再谈光影包前端；它复用本期的 preprocess / manifest，但不复用 dialect（Iris 方言不同）。

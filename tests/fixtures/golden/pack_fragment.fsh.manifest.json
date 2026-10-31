@@ -1,0 +1,108 @@
+{
+  "schema": "illusion.shader-manifest/1",
+  "shader": {
+    "name": "pack_fragment.fsh",
+    "stage": "fragment",
+    "entry": "main",
+    "hlsl_file": "pack_fragment.fsh.hlsl",
+    "shader_model": "6_0"
+  },
+  "resources": {
+    "textures": [
+      {
+        "name": "gcolor",
+        "hlsl_type": "Texture2D<float4>",
+        "register": 1,
+        "space": 0,
+        "group": 0,
+        "binding": 16
+      }
+    ],
+    "samplers": [
+      {
+        "name": "gcolor_sampler",
+        "register": 1,
+        "space": 0,
+        "group": 0,
+        "binding": 17,
+        "comparison": false,
+        "texture": "gcolor"
+      }
+    ],
+    "constant_buffers": [
+      {
+        "name": "constants_CommonUniforms",
+        "hlsl_type": "CommonUniforms",
+        "register": 0,
+        "space": 0,
+        "group": 0,
+        "binding": 0,
+        "size": 36,
+        "members": [
+          {
+            "name": "gl_Fog_start",
+            "hlsl_type": "float",
+            "offset": 0,
+            "size": 4
+          },
+          {
+            "name": "gl_Fog_scale",
+            "hlsl_type": "float",
+            "offset": 4,
+            "size": 4
+          },
+          {
+            "name": "gl_Fog_color",
+            "hlsl_type": "float4",
+            "offset": 16,
+            "size": 16
+          },
+          {
+            "name": "fogEnabled_value",
+            "hlsl_type": "int",
+            "offset": 32,
+            "size": 4
+          }
+        ]
+      }
+    ],
+    "storage_buffers": [],
+    "storage_images": []
+  },
+  "stage_io": {
+    "inputs": [
+      {
+        "name": "texcoord",
+        "location": 0,
+        "hlsl_type": "float2",
+        "interpolation": "Perspective"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "iris_FragData0",
+        "location": 0,
+        "hlsl_type": "float4",
+        "interpolation": "Perspective"
+      },
+      {
+        "name": "iris_FragData1",
+        "location": 1,
+        "hlsl_type": "float4",
+        "interpolation": "Perspective"
+      }
+    ],
+    "builtins": []
+  },
+  "mrt": {
+    "targets": [
+      0,
+      1
+    ]
+  },
+  "warnings": [
+    "lowered 3 gl_Fog field reference(s) to loose uniforms",
+    "lowered 1 bool uniform(s) to int: D3D12 constant buffers cannot hold bool",
+    "moved 4 loose uniform(s) into block `CommonUniforms`"
+  ]
+}

@@ -1,0 +1,30 @@
+{
+  "schema": "illusion.shader-manifest/1",
+  "shader": {
+    "name": "vector_select.fsh",
+    "stage": "fragment",
+    "entry": "main",
+    "hlsl_file": "vector_select.fsh.hlsl",
+    "shader_model": "6_0"
+  },
+  "resources": {
+    "textures": [],
+    "samplers": [],
+    "constant_buffers": [],
+    "storage_buffers": [],
+    "storage_images": []
+  },
+  "stage_io": {
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "fragColor",
+        "location": 0,
+        "hlsl_type": "float4",
+        "interpolation": "Perspective"
+      }
+    ],
+    "builtins": []
+  },
+  "warnings": []
+}

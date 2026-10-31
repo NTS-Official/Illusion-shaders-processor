@@ -1,0 +1,66 @@
+{
+  "schema": "illusion.shader-manifest/1",
+  "shader": {
+    "name": "legacy_sampling.fsh",
+    "stage": "fragment",
+    "entry": "main",
+    "hlsl_file": "legacy_sampling.fsh.hlsl",
+    "shader_model": "6_0"
+  },
+  "resources": {
+    "textures": [
+      {
+        "name": "colortex",
+        "hlsl_type": "Texture2D<float4>",
+        "register": 0,
+        "space": 0,
+        "group": 0,
+        "binding": 16
+      },
+      {
+        "name": "shadowtex0",
+        "hlsl_type": "Texture2D<float>",
+        "register": 1,
+        "space": 0,
+        "group": 0,
+        "binding": 18
+      }
+    ],
+    "samplers": [
+      {
+        "name": "colortex_sampler",
+        "register": 0,
+        "space": 0,
+        "group": 0,
+        "binding": 17,
+        "comparison": false,
+        "texture": "colortex"
+      },
+      {
+        "name": "shadowtex0_sampler",
+        "register": 1,
+        "space": 0,
+        "group": 0,
+        "binding": 19,
+        "comparison": true,
+        "texture": "shadowtex0"
+      }
+    ],
+    "constant_buffers": [],
+    "storage_buffers": [],
+    "storage_images": []
+  },
+  "stage_io": {
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "fragColor",
+        "location": 0,
+        "hlsl_type": "float4",
+        "interpolation": "Perspective"
+      }
+    ],
+    "builtins": []
+  },
+  "warnings": []
+}

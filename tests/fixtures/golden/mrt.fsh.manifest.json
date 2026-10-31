@@ -1,0 +1,62 @@
+{
+  "schema": "illusion.shader-manifest/1",
+  "shader": {
+    "name": "mrt.fsh",
+    "stage": "fragment",
+    "entry": "main",
+    "hlsl_file": "mrt.fsh.hlsl",
+    "shader_model": "6_0"
+  },
+  "resources": {
+    "textures": [],
+    "samplers": [],
+    "constant_buffers": [
+      {
+        "name": "constants_Globals",
+        "hlsl_type": "Globals",
+        "register": 0,
+        "space": 0,
+        "group": 0,
+        "binding": 0,
+        "size": 16,
+        "members": [
+          {
+            "name": "Tint",
+            "hlsl_type": "float4",
+            "offset": 0,
+            "size": 16
+          }
+        ]
+      }
+    ],
+    "storage_buffers": [],
+    "storage_images": []
+  },
+  "stage_io": {
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "iris_FragData0",
+        "location": 0,
+        "hlsl_type": "float4",
+        "interpolation": "Perspective"
+      },
+      {
+        "name": "iris_FragData3",
+        "location": 3,
+        "hlsl_type": "float4",
+        "interpolation": "Perspective"
+      }
+    ],
+    "builtins": []
+  },
+  "mrt": {
+    "targets": [
+      0,
+      3,
+      6,
+      4
+    ]
+  },
+  "warnings": []
+}

@@ -1,0 +1,6 @@
+{
+  "default": {},
+  "world0/shadowcomp.csh": { "IRIS_FEATURE_CUSTOM_IMAGES": "1", "COLORED_LIGHTING": "128" },
+  "world1/shadowcomp.csh": { "IRIS_FEATURE_CUSTOM_IMAGES": "1", "COLORED_LIGHTING": "128" },
+  "world-1/shadowcomp.csh": { "IRIS_FEATURE_CUSTOM_IMAGES": "1", "COLORED_LIGHTING": "128" }
+}

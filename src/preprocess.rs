@@ -1,23 +1,28 @@
-//! GLSL preprocessor: `#include`, conditionals, object-like macros.
+//! GLSL preprocessor: `#include`, conditionals, object-like and function-like macros.
 //!
 //! naga takes a single translation unit and has no include support, so the
 //! source has to be flattened before it reaches the frontend. Everything the
 //! vanilla shader corpus uses is handled here: `#include <minecraft:x.glsl>`,
-//! `#ifdef` / `#ifndef` / `#if defined(...)` / `#elif` / `#else`, and
-//! object-like `#define` (no function-like macros exist in the corpus).
+//! `#ifdef` / `#ifndef` / `#if defined(...)` / `#elif` / `#else`, object-like
+//! `#define`, and function-like `#define` (`#define f(a, b) ...`, which shader
+//! packs need). `#`/`##` are not supported.
 //!
 //! The output keeps one line per input line (includes are inlined) and records
 //! the origin of every output line so diagnostics can point back at the file
-//! the line came from.
+//! the line came from. A macro invocation has to stay on one line: the corpus
+//! only splits `#define` bodies with `\`, which is spliced before parsing.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use crate::lexer::{self, Kind};
+use crate::lexer::{self, Kind, Token};
 
 /// naga's GLSL frontend only accepts 440/450/460, so vanilla `#version 330`
 /// sources are lifted to 450 before parsing.
 pub const NORMALIZED_VERSION: &str = "#version 450 core";
+
+/// Guards against a macro that expands to itself.
+const MAX_EXPANSION_DEPTH: usize = 32;
 
 #[derive(Clone, Debug, Default)]
 pub struct PreprocessOptions {
@@ -83,12 +88,21 @@ pub enum Error {
     },
     #[error("{path}:{line}: unterminated conditional block")]
     UnterminatedConditional { path: PathBuf, line: u32 },
+    #[error("{path}:{line}: unterminated comment")]
+    UnterminatedComment { path: PathBuf, line: u32 },
+    #[error("{path}:{line}: #define {name} has an unterminated parameter list")]
+    MalformedDefine {
+        path: PathBuf,
+        line: u32,
+        name: String,
+    },
 }
 
 #[derive(Clone, Debug)]
 enum MacroDef {
     Flag,
     Value(String),
+    Function { params: Vec<String>, body: String },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -125,6 +139,7 @@ pub fn preprocess_source(
                 (name.clone(), def)
             })
             .collect(),
+        external: options.defines.keys().cloned().collect(),
         include_roots: options.include_roots.clone(),
         stack: Vec::new(),
         out: String::new(),
@@ -163,6 +178,10 @@ pub fn preprocess_source(
 
 struct Preprocessor {
     macros: BTreeMap<String, MacroDef>,
+    /// Macros the caller set; a shader's own `#define`/`#undef` of these is ignored, because a
+    /// loader owns pack options (`COLORED_LIGHTING`, `SHADOW_QUALITY`) and a pack still carries a
+    /// default `#define` for them.
+    external: BTreeSet<String>,
     include_roots: Vec<PathBuf>,
     stack: Vec<PathBuf>,
     out: String,
@@ -182,25 +201,53 @@ impl Preprocessor {
 
     fn process_text(&mut self, path: &Path, source: &str) -> Result<(), Error> {
         let mut frames: Vec<Frame> = Vec::new();
-        let last_line = source.lines().count() as u32;
+        let raw_lines: Vec<&str> = source.lines().collect();
+        let last_line = raw_lines.len() as u32;
+        let mut index = 0usize;
+        // A `#define` inside `/* ... */` is comment text, not a directive; shader packs rely on
+        // that when they comment out a feature toggle.
+        let mut in_comment = false;
 
-        for (index, raw) in source.lines().enumerate() {
+        while index < raw_lines.len() {
             let line_number = index as u32 + 1;
-            let line = raw.strip_suffix('\r').unwrap_or(raw);
+            let mut line = raw_lines[index]
+                .strip_suffix('\r')
+                .unwrap_or(raw_lines[index])
+                .to_owned();
+            while line.trim_end().ends_with('\\') {
+                let trimmed = line.trim_end();
+                line.truncate(trimmed.len() - 1);
+                index += 1;
+                let Some(next) = raw_lines.get(index) else {
+                    break;
+                };
+                line.push(' ');
+                line.push_str(next.strip_suffix('\r').unwrap_or(next));
+            }
+            let started_in_comment = in_comment;
+            in_comment = scan_comment_state(&line, in_comment);
             let trimmed = line.trim_start();
-            if let Some(rest) = trimmed.strip_prefix('#') {
+            if started_in_comment {
+                if Self::is_active(&frames) {
+                    self.push_line(&line, path, line_number);
+                }
+            } else if let Some(rest) = trimmed.strip_prefix('#') {
                 self.directive(path, line_number, rest, &mut frames)?;
-                continue;
+            } else if Self::is_active(&frames) {
+                let expanded = self.expand(&line);
+                self.push_line(&expanded, path, line_number);
             }
-            if !Self::is_active(&frames) {
-                continue;
-            }
-            let expanded = self.expand(line);
-            self.push_line(&expanded, path, line_number);
+            index += 1;
         }
 
         if !frames.is_empty() {
             return Err(Error::UnterminatedConditional {
+                path: path.to_owned(),
+                line: last_line,
+            });
+        }
+        if in_comment {
+            return Err(Error::UnterminatedComment {
                 path: path.to_owned(),
                 line: last_line,
             });
@@ -229,14 +276,16 @@ impl Preprocessor {
             "extension" | "pragma" => Ok(()),
             "define" => {
                 if Self::is_active(frames) {
-                    self.define(arg);
+                    self.define(path, line, arg)?;
                 }
                 Ok(())
             }
             "undef" => {
                 if Self::is_active(frames) {
                     let (name, _) = split_word(arg.trim_start());
-                    self.macros.remove(name);
+                    if !self.external.contains(name) {
+                        self.macros.remove(name);
+                    }
                 }
                 Ok(())
             }
@@ -314,15 +363,44 @@ impl Preprocessor {
         }
     }
 
-    fn define(&mut self, arg: &str) {
-        let (name, value) = split_word(arg.trim_start());
-        let value = strip_trailing_comment(value).trim();
+    fn define(&mut self, path: &Path, line: u32, arg: &str) -> Result<(), Error> {
+        let arg = arg.trim_start();
+        let name_end = arg
+            .find(|ch: char| ch.is_whitespace() || ch == '(')
+            .unwrap_or(arg.len());
+        let (name, rest) = arg.split_at(name_end);
+        if self.external.contains(name) {
+            return Ok(());
+        }
+        if let Some(after_paren) = rest.strip_prefix('(') {
+            let Some(close) = matching_paren(after_paren) else {
+                return Err(Error::MalformedDefine {
+                    path: path.to_owned(),
+                    line,
+                    name: name.to_owned(),
+                });
+            };
+            let params = after_paren[..close]
+                .split(',')
+                .map(str::trim)
+                .filter(|param| !param.is_empty())
+                .map(str::to_owned)
+                .collect();
+            let body = strip_trailing_comment(&after_paren[close + 1..])
+                .trim()
+                .to_owned();
+            self.macros
+                .insert(name.to_owned(), MacroDef::Function { params, body });
+            return Ok(());
+        }
+        let value = strip_trailing_comment(rest).trim();
         if value.is_empty() {
             self.macros.insert(name.to_owned(), MacroDef::Flag);
         } else {
             self.macros
                 .insert(name.to_owned(), MacroDef::Value(value.to_owned()));
         }
+        Ok(())
     }
 
     fn include(&mut self, path: &Path, line: u32, arg: &str) -> Result<(), Error> {
@@ -368,11 +446,15 @@ impl Preprocessor {
             ),
         };
         let name = body.rsplit_once(':').map_or(body, |(_, name)| name);
+        // Shader packs write pack-absolute includes as `/program/x.glsl`; the include root is the
+        // pack's `shaders` directory, so the leading slash only means "from the pack root".
+        let relative = body.trim_start_matches('/');
 
         if !is_angle && let Some(parent) = current.parent() {
-            let candidate = parent.join(body);
-            if candidate.is_file() {
-                return Some(candidate);
+            for candidate in [parent.join(body), parent.join(relative)] {
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
             }
         }
         for root in &self.include_roots {
@@ -380,6 +462,8 @@ impl Preprocessor {
                 root.join("include").join(name),
                 root.join(name),
                 root.join("shaders").join("include").join(name),
+                root.join(relative),
+                root.join("shaders").join(relative),
             ] {
                 if candidate.is_file() {
                     return Some(candidate);
@@ -390,27 +474,63 @@ impl Preprocessor {
     }
 
     fn expand(&self, line: &str) -> String {
-        let mut text = line.to_owned();
-        for _ in 0..8 {
-            let tokens = lexer::tokenize(&text);
-            let mut changed = false;
-            let mut out = String::with_capacity(text.len());
-            for token in &tokens {
-                if token.kind == Kind::Ident
-                    && let Some(MacroDef::Value(value)) = self.macros.get(&token.text)
-                {
-                    out.push_str(value);
-                    changed = true;
-                    continue;
-                }
-                out.push_str(&token.text);
-            }
-            if !changed {
-                break;
-            }
-            text = out;
+        let tokens = lexer::tokenize(line);
+        let expanded = self.expand_tokens(&tokens, 0);
+        let mut out = String::with_capacity(line.len());
+        for token in expanded {
+            out.push_str(&token.text);
         }
-        text
+        out
+    }
+
+    /// Expands object-like and function-like macros in `tokens`; `depth` bounds recursion.
+    fn expand_tokens(&self, tokens: &[Token], depth: usize) -> Vec<Token> {
+        if depth > MAX_EXPANSION_DEPTH {
+            return tokens.to_vec();
+        }
+
+        let mut out = Vec::with_capacity(tokens.len());
+        let mut index = 0usize;
+        while index < tokens.len() {
+            let token = &tokens[index];
+            if token.kind != Kind::Ident {
+                out.push(token.clone());
+                index += 1;
+                continue;
+            }
+            match self.macros.get(&token.text) {
+                Some(MacroDef::Value(value)) => {
+                    let produced = retag(&lexer::tokenize(value), token.line);
+                    out.extend(self.expand_tokens(&produced, depth + 1));
+                    index += 1;
+                }
+                Some(MacroDef::Function { params, body }) => {
+                    let open = lexer::next_significant(tokens, index + 1)
+                        .filter(|at| lexer::is_symbol(&tokens[*at], "("));
+                    let close = open.and_then(|open| matching_close(tokens, open));
+                    let (Some(open), Some(close)) = (open, close) else {
+                        out.push(token.clone());
+                        index += 1;
+                        continue;
+                    };
+                    let arguments = split_arguments(tokens, open + 1, close, token.line);
+                    if arguments.len() != params.len() {
+                        // Wrong arity: leave the call for naga to reject with its own message.
+                        out.push(token.clone());
+                        index += 1;
+                        continue;
+                    }
+                    let substituted = substitute(body, params, &arguments, token.line);
+                    out.extend(self.expand_tokens(&substituted, depth + 1));
+                    index = close + 1;
+                }
+                Some(MacroDef::Flag) | None => {
+                    out.push(token.clone());
+                    index += 1;
+                }
+            }
+        }
+        out
     }
 
     fn push_line(&mut self, text: &str, path: &Path, line: u32) {
@@ -427,7 +547,10 @@ impl Preprocessor {
     }
 
     fn eval(&self, path: &Path, line: u32, name: &str, expr: &str) -> Result<i64, Error> {
-        let replaced = self.replace_defined(expr);
+        // Preprocessor directives end at the newline, but packs annotate them with `// ...` or
+        // `/* ... */`, which the GLSL preprocessor treats as whitespace.
+        let stripped = strip_comments(expr);
+        let replaced = self.replace_defined(&stripped);
         let tokens = tokenize_expression(&replaced).map_err(|reason| Error::Expression {
             path: path.to_owned(),
             line,
@@ -468,9 +591,32 @@ impl Preprocessor {
     }
 
     fn macro_value(&self, name: &str) -> i64 {
+        self.macro_value_at(name, 0)
+    }
+
+    /// Resolves a macro to the integer `#if` sees. Values are expanded first: packs write
+    /// `#define SSAO_QUALI SSAO_QUALI_DEFINE`, which must evaluate through to the number.
+    fn macro_value_at(&self, name: &str, depth: usize) -> i64 {
+        if depth > MAX_EXPANSION_DEPTH {
+            return 0;
+        }
         match self.macros.get(name) {
-            Some(MacroDef::Value(value)) => parse_integer(value).unwrap_or(1),
-            Some(MacroDef::Flag) => 1,
+            Some(MacroDef::Value(value)) => {
+                let trimmed = value.trim();
+                if self
+                    .macros
+                    .get(trimmed)
+                    .is_some_and(|def| !matches!(def, MacroDef::Flag))
+                {
+                    return self.macro_value_at(trimmed, depth + 1);
+                }
+                if let Some(number) = parse_integer(trimmed) {
+                    return number;
+                }
+                let expanded = self.expand(value);
+                parse_integer(expanded.trim()).unwrap_or(1)
+            }
+            Some(MacroDef::Function { .. }) | Some(MacroDef::Flag) => 1,
             None => 0,
         }
     }
@@ -530,10 +676,143 @@ fn split_word(text: &str) -> (&str, &str) {
     (&text[..end], &text[end..])
 }
 
+/// Index of the `)` closing the `(` that precedes `text` (text starts right after it).
+fn matching_paren(text: &str) -> Option<usize> {
+    let mut depth = 0usize;
+    for (offset, byte) in text.bytes().enumerate() {
+        match byte {
+            b'(' => depth += 1,
+            b')' => {
+                if depth == 0 {
+                    return Some(offset);
+                }
+                depth -= 1;
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Index of the token closing the group opened at `open`.
+fn matching_close(tokens: &[Token], open: usize) -> Option<usize> {
+    let close = match tokens.get(open)?.text.as_str() {
+        "(" => ")",
+        "[" => "]",
+        "{" => "}",
+        _ => return None,
+    };
+    let mut depth = 0usize;
+    for (offset, token) in tokens[open..].iter().enumerate() {
+        if token.kind != Kind::Symbol {
+            continue;
+        }
+        if token.text == tokens[open].text {
+            depth += 1;
+        } else if token.text == close {
+            depth -= 1;
+            if depth == 0 {
+                return Some(open + offset);
+            }
+        }
+    }
+    None
+}
+
+/// Splits the arguments between `from` and `to`, keeping brackets and braces intact.
+fn split_arguments(tokens: &[Token], from: usize, to: usize, line: u32) -> Vec<Vec<Token>> {
+    let mut arguments = Vec::new();
+    let mut current: Vec<Token> = Vec::new();
+    let mut depth = 0i32;
+    for token in &tokens[from..to] {
+        if token.kind == Kind::Symbol {
+            match token.text.as_str() {
+                "(" | "[" | "{" => depth += 1,
+                ")" | "]" | "}" => depth -= 1,
+                "," if depth == 0 => {
+                    arguments.push(trim_tokens(&current));
+                    current = Vec::new();
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        current.push(retag(std::slice::from_ref(token), line).remove(0));
+    }
+    arguments.push(trim_tokens(&current));
+    arguments
+}
+
+fn trim_tokens(tokens: &[Token]) -> Vec<Token> {
+    let start = tokens
+        .iter()
+        .position(|token| !token.is_trivia())
+        .unwrap_or(tokens.len());
+    let end = tokens
+        .iter()
+        .rposition(|token| !token.is_trivia())
+        .map_or(start, |at| at + 1);
+    tokens[start..end].to_vec()
+}
+
+/// Replaces parameter names in a macro body with the argument tokens.
+fn substitute(body: &str, params: &[String], arguments: &[Vec<Token>], line: u32) -> Vec<Token> {
+    let body = retag(&lexer::tokenize(body), line);
+    let mut out = Vec::with_capacity(body.len());
+    for token in body {
+        if token.kind == Kind::Ident
+            && let Some(at) = params.iter().position(|param| *param == token.text)
+        {
+            for argument in &arguments[at] {
+                out.push(argument.clone());
+            }
+            continue;
+        }
+        out.push(token);
+    }
+    out
+}
+
+/// Rewrites the line of every token, so diagnostics point at the invocation.
+fn retag(tokens: &[Token], line: u32) -> Vec<Token> {
+    tokens
+        .iter()
+        .map(|token| Token::new(token.kind, &token.text, line))
+        .collect()
+}
+
 fn strip_trailing_comment(text: &str) -> &str {
     let line_comment = text.find("//").unwrap_or(text.len());
     let block_comment = text.find("/*").unwrap_or(text.len());
     &text[..line_comment.min(block_comment)]
+}
+
+/// Advances the block-comment state over one line. A `//` comment hides a later `/*`, so the scan
+/// stops there; the preprocessor only needs to know whether a directive line is comment text.
+fn scan_comment_state(line: &str, mut in_comment: bool) -> bool {
+    let bytes = line.as_bytes();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        if in_comment {
+            if bytes[index..].starts_with(b"*/") {
+                in_comment = false;
+                index += 2;
+            } else {
+                index += 1;
+            }
+            continue;
+        }
+        if bytes[index..].starts_with(b"//") {
+            break;
+        }
+        if bytes[index..].starts_with(b"/*") {
+            in_comment = true;
+            index += 2;
+            continue;
+        }
+        index += 1;
+    }
+    in_comment
 }
 
 fn parse_include_spec(arg: &str) -> Option<String> {
@@ -564,6 +843,34 @@ enum ExprToken {
     Number(i64),
     Ident(String),
     Op(String),
+}
+
+/// Removes `//` and `/* */` comments so a directive expression can be parsed.
+fn strip_comments(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut characters = text.chars().peekable();
+    while let Some(character) = characters.next() {
+        if character == '/' {
+            match characters.peek() {
+                Some('/') => break,
+                Some('*') => {
+                    characters.next();
+                    let mut previous = '\0';
+                    for next in characters.by_ref() {
+                        if previous == '*' && next == '/' {
+                            break;
+                        }
+                        previous = next;
+                    }
+                    out.push(' ');
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        out.push(character);
+    }
+    out
 }
 
 fn tokenize_expression(text: &str) -> Result<Vec<ExprToken>, String> {
@@ -831,6 +1138,108 @@ mod tests {
     }
 
     #[test]
+    fn function_macros_expand_with_arguments() {
+        let preprocessor = Preprocessor {
+            macros: BTreeMap::from([(
+                "projMAD".to_owned(),
+                MacroDef::Function {
+                    params: vec!["m".to_owned(), "v".to_owned()],
+                    body: "(diagonal3(m) * (v) + (m)[3].xyz)".to_owned(),
+                },
+            )]),
+            include_roots: Vec::new(),
+            stack: Vec::new(),
+            out: String::new(),
+            origins: Vec::new(),
+            included: Vec::new(),
+            external: BTreeSet::new(),
+            emitted_version: false,
+        };
+        let expanded = preprocessor.expand("vec3 p = projMAD(shadowProjection, shadowpos);");
+        assert!(
+            expanded.contains(
+                "(diagonal3(shadowProjection) * (shadowpos) + (shadowProjection)[3].xyz)"
+            ),
+            "{expanded}"
+        );
+    }
+
+    #[test]
+    fn function_macro_arguments_keep_nested_calls_together() {
+        let preprocessor = Preprocessor {
+            macros: BTreeMap::from([(
+                "pair".to_owned(),
+                MacroDef::Function {
+                    params: vec!["a".to_owned(), "b".to_owned()],
+                    body: "vec2(a, b)".to_owned(),
+                },
+            )]),
+            include_roots: Vec::new(),
+            stack: Vec::new(),
+            out: String::new(),
+            origins: Vec::new(),
+            included: Vec::new(),
+            external: BTreeSet::new(),
+            emitted_version: false,
+        };
+        let expanded = preprocessor.expand("vec2 v = pair(min(a, b), max(c, d));");
+        assert!(
+            expanded.contains("vec2(min(a, b), max(c, d))"),
+            "{expanded}"
+        );
+    }
+
+    #[test]
+    fn chained_macro_values_resolve_in_conditionals() {
+        let preprocessor = Preprocessor {
+            macros: BTreeMap::from([
+                (
+                    "SSAO_QUALI".to_owned(),
+                    MacroDef::Value("SSAO_QUALI_DEFINE".to_owned()),
+                ),
+                (
+                    "SSAO_QUALI_DEFINE".to_owned(),
+                    MacroDef::Value("2".to_owned()),
+                ),
+            ]),
+            include_roots: Vec::new(),
+            stack: Vec::new(),
+            out: String::new(),
+            origins: Vec::new(),
+            included: Vec::new(),
+            external: BTreeSet::new(),
+            emitted_version: false,
+        };
+        let value = preprocessor
+            .eval(Path::new("test.fsh"), 1, "if", "SSAO_QUALI == 2")
+            .unwrap();
+        assert_eq!(value, 1);
+    }
+    #[test]
+    fn continuation_lines_join_before_parsing() {
+        let source = "#define twice(x) ((x) + \\\n    (x))\nfloat y = twice(2.0);\n";
+        let mut preprocessor = Preprocessor {
+            macros: BTreeMap::new(),
+            include_roots: Vec::new(),
+            stack: Vec::new(),
+            out: String::new(),
+            origins: Vec::new(),
+            included: Vec::new(),
+            external: BTreeSet::new(),
+            emitted_version: false,
+        };
+        preprocessor
+            .process_text(std::path::Path::new("inline.glsl"), source)
+            .expect("preprocess");
+        let squeezed: String = preprocessor.out.split_whitespace().collect();
+        assert!(
+            squeezed.contains("floaty=((2.0)+(2.0));"),
+            "{}",
+            preprocessor.out
+        );
+    }
+
+    #[test]
     fn defined_expression_selects_branch() {
         let options = PreprocessOptions {
             include_roots: roots(),
@@ -841,5 +1250,22 @@ mod tests {
         assert!(result.text.contains("float branch_a;"));
         assert!(!result.text.contains("float branch_b;"));
         assert!(!result.text.contains("float branch_c;"));
+    }
+
+    #[test]
+    fn directive_expressions_ignore_trailing_comments() {
+        let options = PreprocessOptions {
+            include_roots: roots(),
+            defines: BTreeMap::from([("QUALITY".to_owned(), Some("0".to_owned()))]),
+        };
+        let path = PathBuf::from("tests/fixtures/shaders/core/comment_condition.fsh");
+        let result = preprocess(&path, &options).expect("comment is whitespace");
+        assert!(result.text.contains("float potato;"), "{}", result.text);
+        assert!(
+            result.text.contains("float potato_block;"),
+            "{}",
+            result.text
+        );
+        assert!(!result.text.contains("float fancy;"));
     }
 }

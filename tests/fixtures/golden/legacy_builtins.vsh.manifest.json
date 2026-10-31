@@ -1,0 +1,112 @@
+{
+  "schema": "illusion.shader-manifest/1",
+  "shader": {
+    "name": "legacy_builtins.vsh",
+    "stage": "vertex",
+    "entry": "main",
+    "hlsl_file": "legacy_builtins.vsh.hlsl",
+    "shader_model": "6_0"
+  },
+  "resources": {
+    "textures": [],
+    "samplers": [],
+    "constant_buffers": [
+      {
+        "name": "constants_CommonUniforms",
+        "hlsl_type": "CommonUniforms",
+        "register": 0,
+        "space": 0,
+        "group": 0,
+        "binding": 0,
+        "size": 224,
+        "members": [
+          {
+            "name": "iris_ModelViewMat",
+            "hlsl_type": "float4x4",
+            "offset": 0,
+            "size": 64
+          },
+          {
+            "name": "iris_ProjMat",
+            "hlsl_type": "float4x4",
+            "offset": 64,
+            "size": 64
+          },
+          {
+            "name": "iris_TextureMat",
+            "hlsl_type": "float4x4",
+            "offset": 128,
+            "size": 64
+          },
+          {
+            "name": "iris_ModelOffset",
+            "hlsl_type": "float3",
+            "offset": 192,
+            "size": 12
+          },
+          {
+            "name": "iris_ColorModulator",
+            "hlsl_type": "float4",
+            "offset": 208,
+            "size": 16
+          }
+        ]
+      }
+    ],
+    "storage_buffers": [],
+    "storage_images": []
+  },
+  "stage_io": {
+    "inputs": [
+      {
+        "name": "iris_UV0",
+        "location": 0,
+        "hlsl_type": "float2",
+        "interpolation": "Perspective"
+      },
+      {
+        "name": "iris_Normal",
+        "location": 1,
+        "hlsl_type": "float3",
+        "interpolation": "Perspective"
+      },
+      {
+        "name": "iris_Position",
+        "location": 2,
+        "hlsl_type": "float3",
+        "interpolation": "Perspective"
+      },
+      {
+        "name": "iris_Color",
+        "location": 3,
+        "hlsl_type": "float4",
+        "interpolation": "Perspective"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "vertexColor",
+        "location": 0,
+        "hlsl_type": "float4",
+        "interpolation": "Perspective"
+      },
+      {
+        "name": "texCoord",
+        "location": 1,
+        "hlsl_type": "float2",
+        "interpolation": "Perspective"
+      }
+    ],
+    "builtins": [
+      {
+        "name": "gl_Position",
+        "builtin": "Position { invariant: false }",
+        "hlsl_type": "float4"
+      }
+    ]
+  },
+  "warnings": [
+    "rewrote 6 legacy GLSL builtin reference(s)",
+    "moved 5 loose uniform(s) into block `CommonUniforms`"
+  ]
+}

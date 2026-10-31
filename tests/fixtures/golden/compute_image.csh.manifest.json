@@ -1,0 +1,42 @@
+{
+  "schema": "illusion.shader-manifest/1",
+  "shader": {
+    "name": "compute_image.csh",
+    "stage": "compute",
+    "entry": "main",
+    "hlsl_file": "compute_image.csh.hlsl",
+    "shader_model": "6_0"
+  },
+  "resources": {
+    "textures": [],
+    "samplers": [],
+    "constant_buffers": [],
+    "storage_buffers": [],
+    "storage_images": [
+      {
+        "name": "floodfill",
+        "hlsl_type": "RWTexture3D<float4>",
+        "register": 0,
+        "space": 0,
+        "group": 0,
+        "binding": 64,
+        "format": "Rgba32Float",
+        "access": "StorageAccess(STORE)"
+      }
+    ]
+  },
+  "stage_io": {
+    "inputs": [],
+    "outputs": [],
+    "builtins": [
+      {
+        "name": "gl_GlobalInvocationID",
+        "builtin": "GlobalInvocationId",
+        "hlsl_type": "uint3"
+      }
+    ]
+  },
+  "warnings": [
+    "`floodfill` is a storage image of `image3D`; it becomes a UAV (`RWTexture3D<float4>`), which the host cannot bind yet, and the shader named no format, so it became `rgba32f`"
+  ]
+}

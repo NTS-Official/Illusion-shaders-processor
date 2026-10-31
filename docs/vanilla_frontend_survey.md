@@ -191,7 +191,7 @@
 | 能力 | 现状 | 判定 |
 |---|---|---|
 | Rust crate 骨架 | `Cargo.toml` 只有 `naga = "30.0.1"`（**0 个 feature**），`src\lib.rs` 210 B 模板 | 需改：加 feature、拆 crate |
-| 方案文档 | `docs\minecraft_glsl_to_hlsl_rust_technical_plan.md` 1,133 行（M1 验证已固化） | 已有，但**本轮转向后需修订**（见 §9） |
+| 方案文档 | `docs\shader_pack_frontend.md`（光影包前端契约） | 已有，但**本轮转向后需修订**（见 §9） |
 | 验证样本 | `docs\spike\composite5.frag` 2,456 B、`docs\spike\gbuffers_terrain.vert` 1,665 B；glslang / spvc / dxc 三段实测通过 | **已有**（可作回归基线） |
 | 方言规范化设计 | 上一版 §4 的 R1–R11 | 设计已有，代码无 |
 | vanilla profile | — | **需新增** |
@@ -323,7 +323,7 @@
 
 ## 9 本轮未做的事
 
-1. **没有改方案文档正文**。上一版 `docs\minecraft_glsl_to_hlsl_rust_technical_plan.md`（1,133 行）仍以「M1 = 规范化 → glslang → spvc」为基线；本轮结论（弃 SPIR-V、双前端、原版内迁）需要下一轮改写它的 §3 / §6 / §10。建议把本文件作为附件，正文只改「后端选型」「里程碑」「与宿主契约」三章。
+1. **没有改方案文档正文**。光影包前端的要求已整理成 `docs\shader_pack_frontend.md`；实现路线见 `docs\vanilla_glsl_hlsl_plan.md`。
 2. **没有做 P1–P8 探针**（§6.4）。这是 M0 的第一件事，全部可离线跑，不需要进游戏。
 3. **没有量化「自研前端」的真实工作量**。§6.2 的 4–6k 行是估计值；建议 M0 结束时用「原版 72 + 光影包 219 个 stage 入口的解析成功率」替换这个估计。
 4. **没有定 D1–D6**。这些需要拍板，尤其 D2（前端路线）与 D4（原版迁移时机）会改变后续所有里程碑。
